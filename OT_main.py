@@ -48,8 +48,9 @@ def radian_to_latlon(g16_data_file):
 def find_OT_edges(BT_wnd_radii,smBT_wnd_radii,BT_wvp_radii):
     from netCDF4 import Dataset
     import numpy as np
+    import math
 
-    OT_edge=np.zeros(Ndirection,'i')
+    OT_edge=np.zeros(Ndirection,dtype=np.uint8)
     OT_BTwnd_sum=np.zeros(Ndirection,'f')
     OT_BT2wnd_sum=np.zeros(Ndirection,'f')
     OT_BTwvp_sum=np.zeros(Ndirection,'f')
@@ -124,12 +125,12 @@ def OT_main(G16wvp_file):
     #============ change the directory for data acesses========================
     data_dir  ='/data/accp/a/snesbitt/goes-mds-tornado/'
     merra2_dir='/data/accp/a/snesbitt/geos_tt/' # change the the
+    #merra2_dir='' # change the the
     write_dir ='/data/keeling/a/yulanh/c/OT_output/tornado/'
     #=========================================
 
-    scan_mode_flag='M6C13_G16_' # change the scan mode for window channel,which should be same as water vapor channel
+    scan_mode_flag='M6C14_G16_' # change the scan mode for window channel,which should be same as water vapor channel
 
-    print(G16wvp_file)
     #11.2 um
     #G16wnd_file = 'OR_ABI-L1b-RadM2-M3C14_G16_s20183160350548_e20183160351006_c20183160351053.nc'
     G16wnd_file = glob.glob(data_dir + G16wvp_file[-77:-60] + scan_mode_flag + G16wvp_file[-50:-35]+'*')
@@ -139,8 +140,9 @@ def OT_main(G16wvp_file):
         print('No window channel file for:'+G16wvp_file)
         exist()
 
+    print(G16wvp_file,G16wnd_file)
     # for record result
-    wfname =G16wvp_file[-77:-60]+'OT_C0813'+G16wnd_file[-55:-2]+'h5'
+    wfname =write_dir+G16wvp_file[-77:-60]+'OT_C0814'+G16wnd_file[-55:-2]+'h5'
 
     #=== process MERRA2 data file==
     year=G16wnd_file[-49:-45]
@@ -179,7 +181,7 @@ def OT_main(G16wvp_file):
     Rad_wvp=g16nc.variables['Rad'][:]
     g16nc.close()
     g16nc = None
-    lat,lon=radian_to_latlon(G16wvp_file)
+    lat_wvp,lon_wvp=radian_to_latlon(G16wvp_file)
 
     g16nc = Dataset(G16wnd_file,'r')
     fk1_wnd=g16nc.variables['planck_fk1'][:]
@@ -189,7 +191,9 @@ def OT_main(G16wvp_file):
     Rad_wnd=g16nc.variables['Rad'][:]
     g16nc.close()
     g16nc = None
+    lat_wnd,lon_wnd=radian_to_latlon(G16wnd_file)
 
+    #initialize the data array for recording results
     xdim=Rad_wnd.shape[0]
     ydim=Rad_wnd.shape[1]
     OT_Area_circ  = np.zeros((xdim,ydim),'f')
@@ -199,6 +203,9 @@ def OT_main(G16wvp_file):
     ci_meanBTwnd  = np.zeros((xdim,ydim),'f')
     OTci_sigmaBTwnd = np.zeros((xdim,ydim),'f')
     colocate_tropopause_t=np.zeros((xdim,ydim),'f')
+    OT_indices    = np.zeros((xdim,ydim),dtype=np.uint8)
+    OT_edges_write= np.empty((0,8),dtype=np.uint8) 
+    OT_index=1
 
     #==== convert to BT and smooth BT====
     BT_wvp=[fk2_wvp/(np.log((fk1_wvp/Rad_wvp)+1))-bc1_wvp]/bc2_wvp
@@ -220,11 +227,11 @@ def OT_main(G16wvp_file):
     for xi in range(win_size,xdim-win_size):
         for yi in range(win_size,ydim-win_size):
             #print(xi,yi)
-            tp_geoslon  = lon[xi,yi]
-            tp_geoslat  = lat[xi,yi]
+            tp_goeslon  = lon_wnd[xi,yi]
+            tp_goeslat  = lat_wnd[xi,yi]
             # obtain MERRA tropopause temperature 
-            merralon_scp= round((tp_geoslon+180)/0.625) 
-            merralat_scp= round((tp_geoslat+90)/0.5)
+            merralon_scp= round((tp_goeslon+180)/0.625) 
+            merralat_scp= round((tp_goeslat+90)/0.5)
             hour_scp = round(time_utc)
             if (merralon_scp > len(merra2_lon)):
                 merralon_scp = len(merra2_lon)-1
@@ -236,9 +243,9 @@ def OT_main(G16wvp_file):
             colocate_tropopause_t[xi,yi]=tp_tropopause_t
 
             #===== start OT search ===
-            if (abs(tp_geoslat) <= 25):
+            if (abs(tp_goeslat) <= 25):
                 BT_threshold = 200
-            if (abs(tp_geoslat) > 25):
+            if (abs(tp_goeslat) > 25):
                 BT_threshold = 230
 
             if ((BT_wnd[xi,yi] <= BT_threshold) & (BT_wnd[xi,yi] < tp_tropopause_t)):
@@ -248,7 +255,16 @@ def OT_main(G16wvp_file):
                 rowlowres= xi - win_size
                 tpbt_wnd_box=BT_wnd[rowlowres:rowupres,collowres:colupres]
                 tpsmbt_wnd_box=smooth_BT_wnd[rowlowres:rowupres,collowres:colupres]
-                tpbt_wvp_box=BT_wvp[rowlowres:rowupres,collowres:colupres]
+
+
+        #=== obtain BT in wv channle=====
+                goesdiff= (abs(lat_wvp-tp_goeslat)+abs(lon_wvp-tp_goeslon))
+                goesind = np.where(goesdiff == goesdiff.min())
+                xi_wvp  = goesind[0][0]
+                yi_wvp  = goesind[1][0]
+                tpbt_wvp_box=BT_wvp[xi_wvp-win_size:xi_wvp+win_size,\
+                                    yi_wvp-win_size:yi_wvp+win_size]
+
                 #print(xi,yi,BT_wnd[xi,yi],np.min(tpbt_wnd_box))
                 if (BT_wnd[xi,yi] == np.min(tpbt_wnd_box)): #only if the pixel is colder in the window, go to next step
                     # obtain 8 vectors in 8 directions
@@ -274,14 +290,14 @@ def OT_main(G16wvp_file):
                     smBT_wnd_radii[6,:]=smooth_BT_wnd[xi-win_size+1:xi+1,yi][::-1]
                     smBT_wnd_radii[7,:]=np.diagonal(np.fliplr(smooth_BT_wnd[xi-win_size+1:xi+1,yi:yi+win_size]))[::-1]
 
-                    BT_wvp_radii[0,:]=BT_wvp[xi,yi:yi+win_size]
-                    BT_wvp_radii[1,:]=np.diagonal(BT_wvp[xi:xi+win_size,yi:yi+win_size])
-                    BT_wvp_radii[2,:]=BT_wvp[xi:xi+win_size,yi]
-                    BT_wvp_radii[3,:]=np.diagonal(np.fliplr(BT_wvp[xi:xi+win_size,yi-win_size+1:yi+1]).transpose())
-                    BT_wvp_radii[4,:]=BT_wvp[xi,yi-win_size+1:yi+1][::-1]
-                    BT_wvp_radii[5,:]=np.diagonal(BT_wvp[xi-win_size+1:xi+1,yi-win_size+1:yi+1])[::-1]
-                    BT_wvp_radii[6,:]=BT_wvp[xi-win_size+1:xi+1,yi][::-1]
-                    BT_wvp_radii[7,:]=np.diagonal(np.fliplr(BT_wvp[xi-win_size+1:xi+1,yi:yi+win_size]))[::-1]
+                    BT_wvp_radii[0,:]=BT_wvp[xi_wvp,yi_wvp:yi_wvp+win_size]
+                    BT_wvp_radii[1,:]=np.diagonal(BT_wvp[xi_wvp:xi_wvp+win_size,yi_wvp:yi_wvp+win_size])
+                    BT_wvp_radii[2,:]=BT_wvp[xi_wvp:xi_wvp+win_size,yi_wvp]
+                    BT_wvp_radii[3,:]=np.diagonal(np.fliplr(BT_wvp[xi_wvp:xi_wvp+win_size,yi_wvp-win_size+1:yi_wvp+1]).transpose())
+                    BT_wvp_radii[4,:]=BT_wvp[xi_wvp,yi_wvp-win_size+1:yi_wvp+1][::-1]
+                    BT_wvp_radii[5,:]=np.diagonal(BT_wvp[xi_wvp-win_size+1:xi_wvp+1,yi_wvp-win_size+1:yi_wvp+1])[::-1]
+                    BT_wvp_radii[6,:]=BT_wvp[xi_wvp-win_size+1:xi_wvp+1,yi_wvp][::-1]
+                    BT_wvp_radii[7,:]=np.diagonal(np.fliplr(BT_wvp[xi_wvp-win_size+1:xi_wvp+1,yi_wvp:yi_wvp+win_size]))[::-1]
 
                     #calculate the gradient and obtain OT edges, mean BTs 
                     OT_aveBTwnd,OT_aveBTwvp,ci_aveBTwnd,OTci_stdBTwnd,OT_edge = \
@@ -302,16 +318,22 @@ def OT_main(G16wvp_file):
                         OT_meanBTwvp[xi,yi]  = OT_aveBTwvp
                         ci_meanBTwnd[xi,yi]  = ci_aveBTwnd
                         OTci_sigmaBTwnd[xi,yi]= OTci_stdBTwnd
+                        OT_indices[xi,yi] = OT_index
+                        OT_index=OT_index +1
+                        OT_edges_write=np.append(OT_edges_write,[OT_edge],axis=0)
 
     #==== to record the results ======
     hf=h5py.File(wfname,'w')
     hf.create_dataset('OTA_circle',data= OT_Area_circ)
     hf.create_dataset('OT_probability',data= OT_probability)
-    hf.create_dataset('lat',data=lat)
-    hf.create_dataset('lon',data=lon)
+    hf.create_dataset('lat',data=lat_wnd)
+    hf.create_dataset('lon',data=lon_wnd)
     hf.create_dataset('OT_meanBTwnd',data=OT_meanBTwnd)
     hf.create_dataset('OT_meanBTwvp',data=OT_meanBTwvp)
     hf.create_dataset('ci_meanBTwnd',data=ci_meanBTwnd)
     hf.create_dataset('OTci_stdBTwnd',data=OTci_sigmaBTwnd)
+    hf.create_dataset('OT_indices',data=OT_indices)
+    hf.create_dataset('OT_edges',data=OT_edges_write)
+    hf.create_dataset('Tropopause_temperature',data= colocate_tropopause_t)
     hf.close()
 
